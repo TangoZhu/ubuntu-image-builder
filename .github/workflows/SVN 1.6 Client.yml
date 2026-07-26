@@ -55,6 +55,30 @@ jobs:
           curl -fLO -A "Mozilla/5.0" https://archive.apache.org/dist/subversion/subversion-1.6.23.tar.bz2
           tar xf subversion-1.6.23.tar.bz2
 
+      # 已知坑：svn 1.6.23 的 configure 在探测 python swig 绑定时，会用一段
+      # 很旧的 shell/正则逻辑去解析 APR 头文件里 APR_INT64_T_FMT 宏展开后的
+      # 文本，来判断 Python C API 的格式化字符串。这段逻辑跟 APR 1.7.0+（也
+      # 就是 22.04 apt 里的版本）展开宏的方式不兼容，会直接 configure: error
+      # 退出编译——即使传了 --without-swig 也一样会跑到这个检查（这是
+      # svn/subversion 项目里一个有记录的已知 bug，1.6.23 这个年代的版本
+      # 没有修过）。官方后来的修法是改 build/ac-macros/swig.m4 源码，但那是
+      # 生成 configure 脚本用的输入，改了不重新跑 autoreconf 不会生效，而
+      # 对 13 年前的 autoconf 输入用现在的 autoconf 重新生成风险更大。
+      # 这里用更简单粗暴但可靠的办法：编译期间把 python3 从 PATH 里"藏"起来，
+      # configure 探测不到 Python 解释器，就会走"没装 python，跳过 python
+      # 绑定检测"这条正常路径，压根不会碰到那个坏掉的宏解析逻辑。
+      - name: 编译期间临时隐藏 python（绕开 APR 1.7+ 下 swig 探测的已知 bug）
+        run: |
+          : > /tmp/hidden-pythons.txt
+          for p in python3 python python2; do
+            P="$(command -v "$p" 2>/dev/null || true)"
+            if [ -n "$P" ]; then
+              sudo mv "$P" "$P.hidden-for-svn-build"
+              echo "$P" >> /tmp/hidden-pythons.txt
+            fi
+          done
+          cat /tmp/hidden-pythons.txt
+
       - name: 配置并编译
         working-directory: subversion-1.6.23
         run: |
@@ -70,6 +94,15 @@ jobs:
             --with-zlib=/usr \
             --with-sqlite=/usr
           make -j"$(nproc)"
+
+      - name: 恢复 python（收尾，非必需但保持环境干净）
+        if: always()
+        run: |
+          if [ -s /tmp/hidden-pythons.txt ]; then
+            while read -r P; do
+              sudo mv "$P.hidden-for-svn-build" "$P" 2>/dev/null || true
+            done < /tmp/hidden-pythons.txt
+          fi
 
       - name: 校验产物
         working-directory: subversion-1.6.23
